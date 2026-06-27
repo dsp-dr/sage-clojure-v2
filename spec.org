@@ -1,0 +1,165 @@
+#+TITLE: guile-sage — Feature Specification (v1.3)
+#+AUTHOR: dsp-dr
+#+DATE: 2026-06-26
+#+VERSION: 1.3
+#+STATUS: Current — language-agnostic boundary spec; reference impl = guile-sage v1.1.0
+#+OPTIONS: toc:3 num:t ^:nil
+#+STARTUP: overview
+
+The implementation contract for *guile-sage v1.1.0* — what the agent does, as
+shipped. Versioned to match =src/sage/version.scm= (=*version* "1.1.0"=). This is
+the reimplementation target for ports (e.g. =sage-py-1.1.0=). Architecture +
+boundaries: [[file:docs/ARCHITECTURE.org][docs/ARCHITECTURE.org]]; contracts index: [[file:docs/CONTRACTS-INDEX.org][docs/CONTRACTS-INDEX.org]].
+
+* 1. Identity & scope
+A terminal (REPL/TUI) AI coding agent: an LLM drives a tool-use loop over a
+workspace, with sessions, context management, guardrails, and observability. CLI
+entry =sage= (interactive default; =-p/--print= one-shot; =sage mcp-server=
+subcommand). Runtime: guile3/guild3.
+
+* 2. Providers (LLM backends)
+- =SAGE_PROVIDER= ∈ {=ollama=, =gemini=, =openai=}. One active per session.
+- *ollama* — local/cloud, =SAGE_OLLAMA_HOST=, NDJSON streaming.
+- *gemini* — Google API, =GEMINI_API_KEY=, =:generateContent= / SSE.
+- *openai* — OpenAI-shape; the gateway path (LiteLLM / CF AI Gateway):
+  =SAGE_OPENAI_BASE=, =SAGE_OPENAI_API_KEY= (proxy/virtual key only).
+- Per-provider: chat, streaming, tool-calling, token-usage extraction, model list.
+- *Error normalization* (all providers): non-200 → a single clean
+  =[<Provider> <label>: <msg>]= assistant line.
+  - =<label>= is a *provider-normalized human-readable reason* — phrasing is
+    provider-specific (e.g. 404 → gemini "model not found", openai "request
+    failed (HTTP 404)"; 401 → "authentication failed (invalid/expired key)").
+    The *stable contract* is the classification (below) + the shape, NOT
+    byte-identical tokens across providers. Canonical buckets: =connection
+    failed= (0), =authentication failed …= (401/403), =rate limited= (429),
+    =server error= (5xx), provider-specific or =request failed (HTTP <n>)= else.
+  - =<msg>= is a *sanitized, bounded excerpt* of the body — whitespace collapsed
+    to single spaces, ≤200 chars. "Never throw the raw body" means no newlines /
+    no kilobytes / never a thrown Scheme value; a short excerpt IS allowed.
+  - *Classification ≠ retry policy.* Codes are classified permanent (401/403/404)
+    vs transient (0/408/429/5xx) for the label; the *retry* set (§8) is
+    408/429/5xx only — code 0 is classified transient but fails fast.
+- *Model-tier auto-select*: fast/standard tiers (defaults =llama3.2:latest=,
+  ceilings 4000/8000); probe installed models, fall back if missing.
+
+* 3. Tool system
+- Registry of ~34 tools (=register-tool name description json-schema exec-fn
+  #:safe=); 24 are read-only "safe".
+- *Permission model*: safe tools always allowed; mutating tools (write_file,
+  edit_file, git_commit, git_push, eval_scheme, …) require YOLO mode or
+  confirmation. =SAGE_YOLO_MODE=1= permits all.
+- Path containment (=safe-path?=): bare/relative paths resolve against the
+  workspace (default-allow workspace-relative); =/tmp/= allowed; empty path
+  rejected. Reject *NUL bytes* and any =..= (substring match). Block =.env=,
+  =.git/=, =.ssh=, =.gnupg= by *path segment* (so =my.env= / =gitconfig= are
+  fine, =foo/.env= is not). Symlink-safe canonicalization. MUST be *total*
+  (never raises on hostile input).
+- Tool families: file read/list/glob/search; file write/edit (unsafe); git
+  status/diff/log/fetch (+ commit/push/add-note unsafe); fetch_url; log
+  search/stats (self-inspection); agent tasks (beads-backed); generate_image;
+  scratch store; whoami; eval_scheme (unsafe, denylist-sandboxed).
+
+* 4. MCP — bidirectional
+- *Client* (=mcp.scm=): discover SSE MCP servers from =~/.claude.json=, call
+  tools over JSON-RPC (=mcp-init=, =mcp-call-tool=); register them as tools;
+  MCP tools default unsafe.
+- *Server* (=mcp-server.scm=, new in 1.1.0): =sage mcp-server= serves the tool
+  registry over *stdio newline-JSON-RPC 2.0* (=initialize= / =tools/list= /
+  =tools/call= / =ping=); safe-only by default, unsafe behind
+  =SAGE_MCP_EXPOSE_UNSAFE=1=; stdout is JSON-RPC only (logs→stderr). Error codes:
+  =-32700= (parse error, id null — malformed JSON MUST get a reply, not a silent
+  drop), =-32600=, =-32601=, =-32602=. Lets Claude Code / Emacs call sage.
+  - *No oracle*: =tools/call= on an unknown tool AND on an unexposed (gated)
+    tool MUST return the *identical* response (=-32601=, same message) — a peer
+    client must not be able to tell a gated tool from a nonexistent one, nor be
+    told how to escalate. The =SAGE_MCP_EXPOSE_UNSAFE= hint goes to stderr only.
+  - *Framing*: blank / whitespace-only stdin lines are transport framing, not
+    messages — skipped silently (NOT =-32700=). =-32700= is only for non-blank
+    input that fails to parse.
+  *Taint scope*: served results are *plain MCP content* — the taint envelope
+  (§7) is for sage's OWN-LLM path, NOT the server wire; a peer client owns its
+  own trust boundary (a server-side guard may sanitize but must not wrap).
+
+* 5. Agent loop & REPL
+- Interactive REPL: prompt → provider chat (streaming or not) → tool-call loop
+  (execute → feed results back → repeat to a cap) → final answer.
+- Slash commands: /help /version /tools /mcp /model(s) /sessions /save /load
+  /reset /stats /stream /debug /logs /reload /tier /doctor /agent /tasks
+  /compact /define-command + custom commands.
+- =SAGE_STREAMING=0= forces non-streaming.
+
+* 6. Sessions, memory, context
+- Sessions persisted as JSON under XDG (=~/.local/share/sage/sessions/=):
+  name, model, messages, stats (tokens, request/tool counts). File-based.
+- Project-local context: loads =SAGE.md= / =AGENTS.md=.
+- *Context management*: token-limit per model (=*token-limits*=); warnings at
+  *75% / 90% / 95%*; compaction strategies (truncate / token-limit / importance
+  / summarize / intent), auto-compact at threshold; =/compact [n]=.
+
+* 7. Guardrails & safety (the taint boundary)
+- *All external bytes are untrusted data, never instructions.* Single choke
+  point: every tool result (native AND MCP) → =guard-tool-result= →
+  =wrap-tool-result= → =<tool-result safe="false">= over (for fetches)
+  =<fetch-result trust="untrusted" sha256=…>= over CDATA, with =]]>= breakout
+  escaping. System prompt declares tool-result blocks untrusted.
+- Trust lattice (=provenance.scm=): =untrusted < provider < local < verified=.
+- Sandbox/confinement awareness (=sandbox.scm=); see =docs/CHAOS-TESTING.org=,
+  =rfc/003= for the ephemeral-key/egress design.
+
+* 8. HTTP transport & resilience
+- All HTTP via curl with =--connect-timeout 5=; startup model probe fails fast
+  (no retry); chat (=http-post-with-timeout=) retries the *transient set*
+  =408/429/5xx= with exponential backoff (=SAGE_HTTP_MAX_RETRIES=, default 2).
+  Connection failure (code 0) fails fast (no retry — each retry costs a full
+  connect-timeout for no gain).
+- *Spawn boundary*: shell out via libc =(system …)= only — never =system*= /
+  =open-pipe*= / =open-input-pipe= (they SIGSEGV in this long-lived,
+  multi-threaded runtime). Streaming = =(system "curl … > FIFO &")= +
+  =(open-input-file FIFO)=.
+
+* 9. Hooks
+- Lifecycle hooks (PreToolUse / PostToolUse) — register guards/observers; can
+  veto a tool call. Negative contracts: things the agent MUST NOT do
+  (=docs/HOOK-NEGATIVE-CONTRACTS.org=).
+
+* 10. Observability (telemetry)
+- OTLP/HTTP metrics (fire-and-forget; no-op if endpoint unset). Counters:
+  sessions, token usage (model + in/out), tool decisions, active time, cost.
+  =OTEL_EXPORTER_OTLP_*=, =SAGE_TELEMETRY_DISABLE=, =SAGE_DEBUG_HTTP= wire logs.
+
+* 11. Build, test, config conventions
+- =gmake= (GNU make; BSD make mis-parses it); =guile3=/=guild3= (auto-detected).
+- Targets: =build= / =check= / =help= / =run= / =install= / lint-{code,org,docs,
+  contracts} / =chaos-net= / =mcp-smoke=.
+- Tests: SRFI-64 suite (=gmake check=, ~40 files) + *property-based testing*
+  (=test-pbt.scm=, thousands of trials) + contract/doc lints + a tmux PTY chaos
+  harness. Custom runners propagate failures (no masked greens).
+- Config precedence: =SAGE_<KEY>= env → =<KEY>= env → dotenv (=.env=,
+  =~/.config/sage/.env=) → default. XDG dirs.
+
+* 13. Ports (language matrix)
+The spec is language-agnostic; each port implements the §12 priority boundaries
+and verifies them with *property-based testing*. Spec version advances with each
+new port milestone.
+
+| Spec | Language | Repo | PBT | Status |
+|------+----------+------+-----+--------|
+| 1.1 | Guile (reference) | =dsp-dr/guile-sage= | test-pbt.scm | shipped (impl v1.1.0) |
+| 1.1 | Python | =dsp-dr/sage-py-1.1.0= | hypothesis | boundaries done (29 props) |
+| 1.2 | Go | =dsp-dr/sage-go-1.2= | testing/quick | shipped (go test green) |
+| 1.3 | Janet | =dsp-dr/sage-janet-1.3= | hand-rolled generators | shipped (25 checks) |
+| 1.4 | Common Lisp (ECL) | =dsp-dr/sage-cl-1.4= | hand-rolled (dep-free) | in progress |
+| 2.0 | (TBD ×2) | — | — | after eng+product+mgmt audit → v2 spec |
+
+Roadmap to v2: once 1.3 lands, run a full engineering + product + management
+audit of the ports + spec, synthesize a *v2 spec*, then add two more language
+ports against it.
+
+* 12. Reimplementation notes (for ports, e.g. sage-py-1.1.0)
+A port MUST preserve, in priority order: (1) the *taint boundary* (§7) — single
+choke point, untrusted wrapping; (2) the *permission model* (§3) — safe/unsafe +
+YOLO; (3) *provider error normalization* + *HTTP resilience* (§2/§8); (4) the
+*MCP server + client* contracts (§4); (5) *context/compaction* thresholds (§6).
+Surface details (slash-command names, file layout) may differ; the boundaries
+and contracts may not. Verify a port against these as executable assertions —
+ideally property-based.

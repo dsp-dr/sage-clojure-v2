@@ -1,0 +1,49 @@
+;; sage-clojure-v2 — second reference implementation of guile-sage (spec v2).
+;; JSON is hand-rolled (src/sage_clojure/json.clj); the boundary layer pulls in
+;; only test.check. The dev/test/debug TOOLING lives in aliases below — the
+;; canonical Clojure stack for testing, property-based testing, REPL/editor,
+;; debugging, and time-travel debugging. (Bump versions: clj -X:deps find-versions.)
+{:paths ["src"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}}
+ :aliases
+ {;; --- Tests + property-based testing (PBT) -------------------------------
+  ;; clj -M:test   (test.check = canonical Clojure PBT)
+  :test
+  {:extra-paths ["test"]
+   :extra-deps  {org.clojure/test.check {:mvn/version "1.1.1"}}
+   :main-opts   ["-m" "sage-clojure.runner"]}
+
+  ;; --- MCP server entry (stdio JSON-RPC 2.0) -----------------------------
+  :mcp-server {:main-opts ["-m" "sage-clojure.mcp-server"]}
+
+  ;; --- nREPL + CIDER (editor/Emacs integration, CIDER stepping debugger) -
+  ;; clj -M:repl  -> writes .nrepl-port; M-x cider-connect in Emacs.
+  :repl
+  {:extra-deps {nrepl/nrepl                {:mvn/version "1.3.1"}
+                cider/cider-nrepl          {:mvn/version "0.50.2"}
+                com.bhauman/rebel-readline {:mvn/version "0.1.5"}}
+   :main-opts  ["-m" "nrepl.cmdline"
+                "--middleware" "[cider.nrepl/cider-middleware]"
+                "--interactive"]}
+
+  ;; --- Time-travel / omniscient debugging: FlowStorm ---------------------
+  ;; clj -M:flowstorm:test (or :repl). Records execution; step backward,
+  ;; inspect any past value. FlowStorm is THE Clojure time-travel debugger.
+  :flowstorm
+  {:extra-deps {com.github.flow-storm/flow-storm-dbg {:mvn/version "4.2.0"}}
+   :jvm-opts   ["-Dflowstorm.startRecording=true"
+                "-Dclojure.storm.instrumentEnable=true"
+                "-Dclojure.storm.instrumentOnlyPrefixes=sage-clojure"]}
+
+  ;; --- Local-capture debugging (scope-capture: sc.api) -------------------
+  :dbg {:extra-deps {vvvvalvalval/scope-capture {:mvn/version "0.3.3"}}}
+
+  ;; --- Data navigation / tap> inspector (Portal) -------------------------
+  ;; clj -M:portal
+  :portal {:extra-deps {djblue/portal {:mvn/version "0.58.5"}}}
+
+  ;; --- Lint + format -----------------------------------------------------
+  :lint   {:extra-deps {clj-kondo/clj-kondo {:mvn/version "2025.04.07"}}
+           :main-opts  ["-m" "clj-kondo.main" "--lint" "src" "test"]}
+  :format {:extra-deps {dev.weavejester/cljfmt {:mvn/version "0.13.0"}}
+           :main-opts  ["-m" "cljfmt.main" "check" "src" "test"]}}}

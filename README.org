@@ -1,0 +1,142 @@
+#+TITLE: sage-clojure
+#+AUTHOR: dsp-dr
+#+VERSION: v2
+#+STATUS: second reference implementation — feature parity with guile-sage
+
+A Clojure port of [[https://github.com/dsp-dr/guile-sage][guile-sage]] (the reference terminal AI coding agent),
+elevated to a *SECOND REFERENCE IMPLEMENTATION at feature parity* with the
+primary Guile impl. It implements both the hardened §12 boundaries and the §5/§6
+agent surface (REPL loop, sessions, context/compaction, MCP client + server).
+
+Truth sources: [[file:spec.org][spec.org]] (the v2 contract) and, authoritative where they differ,
+guile-sage's =spec.org= §1–§11 + =src/sage/*.scm=. JSON is *hand-rolled*
+(=src/sage_clojure/json.clj=) — =clojure.data.json= is NOT used. HTTP shells out
+to =curl=. Runs on the *Clojure 1.12 CLI* (=clj=); the only third-party dep is
+=org.clojure/test.check=.
+
+* Quick start
+#+begin_src sh
+gmake help          # awk-rendered target list (default goal)
+gmake build         # load every namespace (compile check)
+gmake check         # property + boundary + surface tests (nonzero exit on fail)
+gmake run           # interactive agent REPL (set a provider via env)
+gmake print P="..." # one-shot prompt
+gmake mcp-server    # serve the tool registry over stdio JSON-RPC 2.0
+#+end_src
+
+Direct =clj= invocations:
+#+begin_src sh
+clj -M:test                       # tests
+clj -M -m sage-clojure.repl       # interactive REPL
+clj -M -m sage-clojure.repl -p "summarize foo.clj"   # one-shot
+clj -M -m sage-clojure.repl mcp-server               # MCP server (stdio)
+clj -M:mcp-server                 # MCP server (alias)
+#+end_src
+
+Provider via env (precedence =SAGE_<K>= → =<K>= → dotenv → default):
+=SAGE_PROVIDER= ∈ {=ollama=,=gemini=,=openai=}; =SAGE_OLLAMA_HOST=,
+=GEMINI_API_KEY=, =SAGE_OPENAI_BASE= / =SAGE_OPENAI_API_KEY=; =SAGE_MODEL=,
+=SAGE_YOLO_MODE=1=, =SAGE_STREAMING=0=, =SAGE_MCP_EXPOSE_UNSAFE=1=.
+
+* Scaffold (all implemented)
+| File | §  | What |
+|------+----+------|
+| =version.clj=    | -- | version string =v2= |
+| =json.clj=       | -- | hand-rolled JSON reader/writer, null sentinel |
+| =config.clj=     | 11 | =SAGE_<K>=→=<K>=→dotenv→default; XDG dirs; token-limits + get-token-limit |
+| =http.clj=       | 8  | curl =--connect-timeout 5=; retry 408/429/5xx exp backoff; code 0 fast-fail |
+| =providers.clj=  | 2  | error norm + classify; real chat/stream/list-models (ollama/gemini/openai), response normalization, token usage |
+| =tools.clj=      | 3  | TOTAL per-token =safe-path?=; permission model; immutable registry |
+| =taint.clj=      | 7  | guard/wrap =<tool-result safe="false">= CDATA, =]]>= escape, trust lattice |
+| =mcp_server.clj= | 4  | stdio JSON-RPC, safe-only, -32700, name-free no-oracle, served-plain |
+| =mcp_client.clj= | 4  | discover ~/.claude.json, stdio JSON-RPC, register (unsafe), call |
+| =repl.clj=       | 5  | agent loop (tool-call→taint-wrap→re-prompt), slash commands, =-p= one-shot |
+| =session.clj=    | 6  | JSON sessions under XDG; context thresholds 75/90/95; compaction strategies |
+
+* Boundaries (hardened to the authoritative spec, §12 priority order)
+1. *Taint boundary (§7)* — single choke point =guard-tool-result= →
+   =wrap-tool-result= → =<tool-result safe="false">= over CDATA, =]]>= escaped
+   as =]]]]><![CDATA[>=; byte-faithful round-trip. Trust lattice
+   =untrusted < provider < local < verified= (own-LLM path only). The agent
+   loop wraps EVERY tool result here; the MCP server serves *plain*.
+2. *Permission model (§3)* — safe always allowed; unsafe needs YOLO or
+   confirmation. =safe-path?= TOTAL: rejects NUL / any =..= / empty; *PER-TOKEN*
+   sensitive-segment block — a segment ==.env= OR starting =.env.= (so
+   =.env.local= / =.env.production= are blocked, =my.env= allowed), exact
+   =.git=/=.ssh=/=.gnupg= (so =.gitignore= allowed); block applies to *ALL*
+   paths *including =/tmp/=*.
+3. *Provider error norm + HTTP resilience (§2/§8)* — one-line
+   =[<Provider> <label>: <msg>]=; =<msg>= has ALL control bytes (C0 <0x20 +
+   DEL 0x7f) neutralized, ≤200 *bytes* (UTF-8-boundary-safe) + ellipsis;
+   permanent =401/403/404= vs transient =0/408/429/5xx=; retry set =408/429/5xx=
+   (code 0 fast-fails), exp backoff, =SAGE_HTTP_MAX_RETRIES= (2).
+4. *MCP server (§4)* — initialize / tools/list / tools/call / ping; safe-only
+   unless =SAGE_MCP_EXPOSE_UNSAFE=1=; =-32700= on malformed (blank = framing
+   skip); *name-free no-oracle* (unknown == unexposed → byte-identical =-32601=
+   with the fixed message ="Unknown tool"=, tool name to stderr only); served
+   results PLAIN.
+5. *Context/compaction (§6)* — per-model token limits, warnings at 75/90/95 %,
+   strategies truncate / token-limit / summarize / auto, auto-compact at threshold.
+
+* Surface (feature parity, §5/§6/§4-client)
+- *Agent loop* (=repl/run-turn=): prompt → provider chat → tool-call loop
+  (execute via registry, guard+taint-wrap on the own-LLM path, re-prompt) →
+  final answer; iteration cap (10) + degenerate-repeat cutoff (3). The provider
+  call is an injected =chat-fn= so the loop is tested with a mock (no live LLM).
+- *Slash commands*: =/help /version /tools /model /models /sessions /save /load
+  /reset /clear /stats /context /stream /compact /mcp /debug /exit /quit=.
+- *Sessions*: JSON persistence under XDG data home; save/load/list/reset;
+  byte-faithful round-trip.
+- *Providers*: real request/response for ollama (=/api/chat=, NDJSON streaming),
+  gemini (=:generateContent=), openai-shape (=/chat/completions=); token-usage
+  extraction; model listing; non-200 collapses through the error-line.
+- *MCP client*: discover servers from =~/.claude.json=, stdio JSON-RPC, register
+  discovered tools (default unsafe), call them; interop-tested against our own
+  =mcp-server/dispatch=.
+
+* Tests
+=clj -M:test= runs a custom runner (=test/sage_clojure/runner.clj=) that
+*propagates failures* (=System/exit 1= on any fail/error — no masked greens),
+using =org.clojure/test.check= for properties alongside example-based cases.
+
+Current: *65 tests / 274 assertions*; property generators run 200–500 trials.
+- Boundary: JSON round-trip + null/empty/missing distinction; CDATA byte-faithful
+  round-trip (incl =]]>=); per-token =safe-path?= (incl =.env.local=, =/tmp/.ssh=)
+  + NUL/=..=/totality; control-byte + UTF-8-byte-bounded error; HTTP retry set +
+  backoff; MCP framing/=-32700=/name-free no-oracle/served-plain.
+- Surface: tool-call loop executes + taint-wraps a result, permission denial,
+  degenerate + iteration caps; provider response normalization (3 providers,
+  tool-call parsing, token usage); session save/load round-trip + stats +
+  thresholds + compaction strategies + auto-compact trigger; slash-command
+  dispatch; MCP-client discovery parsing + registration + client↔server interop.
+
+* Spec ambiguities surfaced / resolved here
+- *JSON null vs ={}= vs absent are THREE distinct states*: JSON =null= parses to
+  a sentinel (=json/null=), NOT Clojure =nil=. =(get m k)= → =nil= means
+  *absent*; the sentinel means *present-and-null*; ={}= is an empty map. Drives
+  wire semantics: =id: null= demands a reply, *absent* =id= is a notification.
+- *Per-token vs substring vs exact path block*: neither plain substring nor plain
+  exact is right — =.env= is a prefix rule (=.env.*=), the others are exact. The
+  earlier port did plain-segment match and MISSED =.env.local=.
+- *No-oracle requires a NAME-FREE constant*: echoing the caller's tool name makes
+  the gated and nonexistent replies differ per call (an =Eq= violation). The wire
+  message must be the fixed ="Unknown tool"=.
+- *Error excerpt is byte-bounded, not char-bounded*, and must strip *all* control
+  bytes (not just whitespace) — multibyte truncation must not split a code point.
+- *Agent-loop re-prompt shape* (not exercised by boundary-only ports): the loop
+  calls the provider once per round (initial + after each tool batch); tool
+  results re-enter as =user= messages wrapped in the taint envelope; degenerate
+  detection keys on tool *name + args* so legitimate paging isn't a false stop.
+- *Compaction thresholds*: warnings at 75/90/95 % fire once per crossing (a fired
+  set), independent of the *auto-compact* trigger (default 0.8 of the model limit,
+  compacting to ~0.5); =get-token-limit= is a model-substring lookup, first match.
+- *MCP-client discovery*: =~/.claude.json= entries split into stdio (=command=)
+  and SSE (=url=) transports. *stdio is implemented* (same wire as our server);
+  *SSE transport is a spec-tagged TODO* (guile uses curl+FIFO SSE — not ported).
+
+* Known partial / TODO (honestly marked)
+- SSE MCP-client transport: discovered + surfaced, not dialed (=mcp_client.clj=
+  =discover-and-register!= filters to stdio). TODO(spec §4).
+- openai/gemini *streaming*: fall back to a single non-stream call then emit the
+  whole content once; only ollama does true NDJSON delta streaming.
+  TODO(spec §2 streaming) in =providers.clj=.
