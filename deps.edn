@@ -1,4 +1,4 @@
-;; sajure-v2 — second reference implementation of guile-sage (spec v2).
+;; sajure — second reference implementation of guile-sage (spec v5).
 ;; JSON is hand-rolled (src/sajure/json.clj); the boundary layer pulls in
 ;; only test.check. The dev/test/debug TOOLING lives in aliases below — the
 ;; canonical Clojure stack for testing, property-based testing, REPL/editor,

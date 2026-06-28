@@ -1,4 +1,4 @@
-# CLAUDE.md — sajure-v2 continuation guide
+# CLAUDE.md — sajure continuation guide
 
 Cold-start guide for an agent picking up the **second reference implementation**
 of sage (feature parity with guile-sage). Read this + `spec.org` before editing.
@@ -61,7 +61,7 @@ differs from local `spec.org` = **guile-sage/spec.org §1–§11 + src/sage/*.sc
 
 - **gmake, not make**; **clj, not lein/boot**. Working dir resets between bash
   calls in this harness — use absolute paths.
-- The repo lives at `…/sajure-v2` (hyphen). Namespaces use `sajure.*`;
+- The repo lives at `…/sajure`. Namespaces use `sajure.*`;
   files use `sajure/*.clj` (underscore — Clojure munging).
 - `clojure.core/reset!` collision: an atom-mutating session fn named `reset!`
   shadows core and breaks every later `(reset! atom …)`. The stateful clear is
@@ -170,7 +170,7 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build-team continuation guide
 
-# CLAUDE.md — sajure-v2 continuation guide
+# CLAUDE.md — sajure continuation guide
 
 Cold-start guide for an agent picking up the **second reference implementation**
 of sage (feature parity with guile-sage). Read this + `spec.org` before editing.
@@ -233,7 +233,7 @@ differs from local `spec.org` = **guile-sage/spec.org §1–§11 + src/sage/*.sc
 
 - **gmake, not make**; **clj, not lein/boot**. Working dir resets between bash
   calls in this harness — use absolute paths.
-- The repo lives at `…/sajure-v2` (hyphen). Namespaces use `sajure.*`;
+- The repo lives at `…/sajure`. Namespaces use `sajure.*`;
   files use `sajure/*.clj` (underscore — Clojure munging).
 - `clojure.core/reset!` collision: an atom-mutating session fn named `reset!`
   shadows core and breaks every later `(reset! atom …)`. The stateful clear is

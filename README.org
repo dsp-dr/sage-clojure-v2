@@ -8,7 +8,7 @@ elevated to a *SECOND REFERENCE IMPLEMENTATION at feature parity* with the
 primary Guile impl. It implements both the hardened §12 boundaries and the §5/§6
 agent surface (REPL loop, sessions, context/compaction, MCP client + server).
 
-Truth sources: [[file:spec.org][spec.org]] (the v2 contract) and, authoritative where they differ,
+Truth sources: [[file:spec.org][spec.org]] (the v5 contract) and, authoritative where they differ,
 guile-sage's =spec.org= §1–§11 + =src/sage/*.scm=. JSON is *hand-rolled*
 (=src/sajure/json.clj=) — =clojure.data.json= is NOT used. HTTP shells out
 to =curl=. Runs on the *Clojure 1.12 CLI* (=clj=); the only third-party dep is
